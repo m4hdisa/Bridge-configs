@@ -222,6 +222,8 @@ var import_node_zlib = require("node:zlib");
 var WARP_METHODS = [
   { id: "gool", label: "Gool (WARP in WARP)", hint: "Exits outside Iran: a second WARP hop is opened from inside the first, so Cloudflare gives a foreign address. Much slower than the others, upload most of all.", auto: false },
   { id: "gool-h3", label: "Gool over HTTP/3", hint: "Gool with a faster download than plain Gool. Needs UDP, which some networks block.", auto: false },
+  { id: "mim-h2", label: "MASQUE in MASQUE over HTTP/2", hint: "Exits outside Iran another way: a second MASQUE hop inside the first, over TCP. Slower than a single tunnel.", auto: false },
+  { id: "mim", label: "MASQUE in MASQUE over HTTP/3", hint: "Exits outside Iran another way: a second MASQUE hop inside the first. Needs UDP, which some networks block.", auto: false },
   { id: "h3", label: "MASQUE over HTTP/3", hint: "Fastest. Needs UDP, which some networks block (often Irancell).", auto: true },
   { id: "h2", label: "MASQUE over HTTP/2", hint: "Runs over TCP, for networks that block QUIC / UDP.", auto: true },
   { id: "h2-fragment", label: "HTTP/2 + fragment", hint: "Splits the TLS handshake, for networks that reset it (some home internet).", auto: true },
@@ -318,9 +320,9 @@ function warpServerFromLink(link) {
 function warpMethods(options) {
   const method = options?.method ?? "auto";
   const fast = WARP_METHODS.filter((m) => m.auto).map((m) => m.id);
-  return method === "auto" ? fast : method === "auto-foreign" ? ["gool", ...fast] : [method];
+  return method === "auto" ? fast : method === "auto-foreign" ? ["gool", "mim-h2", ...fast] : [method];
 }
-var WARP_FIND_METHODS = ["gool", ...WARP_METHODS.filter((m) => m.auto).map((m) => m.id)];
+var WARP_FIND_METHODS = ["gool", "mim-h2", ...WARP_METHODS.filter((m) => m.auto).map((m) => m.id)];
 function warpLabel(method) {
   return WARP_METHODS.find((m) => m.id === method)?.label ?? method;
 }
@@ -329,22 +331,26 @@ var METHOD_ARGS = {
   // so it needs no direct access to the WARP API, and Cloudflare gives it a foreign exit.
   gool: ["--gool", "--h2", "-4"],
   "gool-h3": ["--gool", "--h3", "-4"],
+  // A MASQUE tunnel inside a MASQUE one. Its second account is made from inside the first.
+  "mim-h2": ["--mim", "--h2", "-4"],
+  mim: ["--mim", "--h3", "-4"],
   h3: ["--masque", "--h3", "-4"],
   h2: ["--masque", "--h2", "-4"],
   "h2-fragment": ["--masque", "--h2", "--fragment", "-4"],
   "h2-ipv6": ["--masque", "--h2", "-6"],
   wireguard: ["--wg", "-4"]
 };
-function warpArgs(method, port, configFile, peer, fresh = false, verifyGateway = false) {
+function warpArgs(method, port, configFile, peer, fresh = false, verifyGateway = false, psiphon) {
   return [
     ...METHOD_ARGS[method],
-    // A saved gateway: no scan. For Gool it is the outer (MASQUE) hop.
-    ...peer ? ["--peer", peer] : [],
+    // A saved gateway: no scan. For the two-hop methods it is the outer hop.
+    ...peer ? [method === "mim" || method === "mim-h2" ? "--mim-outer" : "--peer", peer] : [],
     // A gateway from someone else's link has to prove it really is Cloudflare's.
     ...verifyGateway ? ["--tls-verify"] : [],
-    // Stop at the first gateway that passes real traffic: connecting fast matters more here.
+    // Stop at the first gateway that passes real traffic: connecting fast matters more here. With
+    // two hops, "verified" keeps them in separate ranges, which is what moves the exit address.
     "--scan",
-    "turbo",
+    prefersForeignExit(method) ? "verified" : "turbo",
     // The last working gateway is one file shared by every method; "Find configs" ignores it
     // so each method proves a gateway of its own.
     fresh ? "--no-quick-reconnect" : "--quick-reconnect",
@@ -352,22 +358,25 @@ function warpArgs(method, port, configFile, peer, fresh = false, verifyGateway =
     `127.0.0.1:${port}`,
     "--config",
     configFile,
-    // Gool is there for its foreign exit, so it refuses an Iranian one and looks again. The
+    // Two hops are there for the foreign exit, so they refuse an Iranian one and look again. The
     // others take what they get: from Iran that is almost always an address Cloudflare
     // registers in Iran (the traffic still leaves abroad, so filtering is bypassed).
-    ...prefersForeignExit(method) ? ["--exit-loc", "!IR"] : []
+    ...prefersForeignExit(method) ? ["--exit-loc", "!IR"] : [],
+    // Psiphon inside the tunnel, on a port of its own: aether -> WARP -> Psiphon -> the internet.
+    ...psiphon ? ["--psiphon", "--psiphon-bin", psiphon.bin, "--psiphon-bind", `127.0.0.1:${psiphon.port}`, ...psiphon.region ? ["--psiphon-region", psiphon.region] : []] : []
   ];
 }
 function prefersForeignExit(method) {
-  return method === "gool" || method === "gool-h3";
+  return method === "gool" || method === "gool-h3" || method === "mim" || method === "mim-h2";
 }
 var WARP_STATE_FILE = "bridge-warp-state.json";
-var GOOL_RETRY_MS = 6 * 60 * 60 * 1e3;
+var GOOL_RETRY_MS = 30 * 60 * 1e3;
+var H3_RETRY_MS = 6 * 60 * 60 * 1e3;
 function waitForGool(state, now = Date.now()) {
   return !state.goolMissedAt || now - state.goolMissedAt >= GOOL_RETRY_MS;
 }
 function waitForH3(state, now = Date.now()) {
-  return !state.h3MissedAt || now - state.h3MissedAt >= GOOL_RETRY_MS;
+  return !state.h3MissedAt || now - state.h3MissedAt >= H3_RETRY_MS;
 }
 var WARP_REGISTER_TRIES = [
   // The fragment splits the ClientHello whose server name the firewall looks for.
@@ -390,10 +399,10 @@ function warpExitCountry(text) {
   return text.match(/\bexit: \S+, ([A-Z]{2}) via /)?.[1];
 }
 function warpGateway(text) {
-  return text.match(/using cloudflare edge (\S+:\d+)/)?.[1];
+  return text.match(/using cloudflare edge (\S+:\d+)/)?.[1] ?? text.match(/masque-in-masque ready: (\S+:\d+) \(outer\)/)?.[1];
 }
 var WARP_EXIT_REFUSED = /exit location [A-Z]{2} rejected/;
-var WARP_MAX_EXIT_REFUSED = 2;
+var WARP_MAX_EXIT_REFUSED = 5;
 var WARP_NO_IPV6 = /host has no IPv6 route/;
 
 // src/main/xray.ts
@@ -2204,6 +2213,40 @@ var SOURCES = [
 var where = ({ repo, branch = "main", path }) => [`https://raw.githubusercontent.com/${repo}/${branch}/${path}`, `https://cdn.jsdelivr.net/gh/${repo}@${branch}/${path}`];
 var PUBLIC_SOURCE_LISTS = SOURCES.map(where);
 var PUBLIC_CLEAN_LIST = where({ repo: "m4hdisa/Bridge-configs", path: "clean.txt" });
+var PUBLIC_CLOUDFLARE_LIST = where({ repo: "m4hdisa/Bridge-configs", path: "cloudflare.txt" });
+var COLLECTOR_EXTRA_LISTS = [
+  "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+  "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/mix",
+  "https://raw.githubusercontent.com/Delta-Kronecker/V2ray-Config/refs/heads/main/config/all_configs.txt",
+  "https://raw.githubusercontent.com/mahsanet/MahsaFreeConfig/refs/heads/main/mtn/sub_1.txt",
+  "https://raw.githubusercontent.com/iampedii/whitedns-sub/refs/heads/main/base64.txt",
+  "https://raw.githubusercontent.com/iampedii/whitedns-sub/refs/heads/main/cloudflare-base64.txt",
+  "https://raw.githubusercontent.com/4n0nymou3/multi-proxy-config-fetcher/refs/heads/main/configs/proxy_configs_tested.txt",
+  "https://raw.githubusercontent.com/roosterkid/openproxylist/main/V2RAY_RAW.txt",
+  "https://raw.githubusercontent.com/arshiacomplus/v2rayExtractor/refs/heads/main/mix/sub.html",
+  "https://raw.githubusercontent.com/ShadowException/VPN/refs/heads/main/configs/VPN-cat",
+  "https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt",
+  "https://raw.githubusercontent.com/v2FreeHub/v2hub-configs/refs/heads/main/Sub-AutoUpdate",
+  "https://raw.githubusercontent.com/prominbro/sub/refs/heads/main/212.txt",
+  "https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt",
+  "https://raw.githubusercontent.com/luxxuria/harvester/refs/heads/main/speed_tested.txt",
+  "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt",
+  "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+  "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/refs/heads/main/all_configs.txt",
+  "https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub",
+  "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+  "https://raw.githubusercontent.com/Leon406/SubCrawler/main/sub/share/vless",
+  "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+  "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
+  "https://raw.githubusercontent.com/HnCgs/HomayounConfigs/refs/heads/main/configs.txt"
+].map((url) => [url]);
+function publicKey(s) {
+  const t = s.outbound.transport;
+  const x = s.xray?.streamSettings;
+  const front = x?.wsSettings ?? x?.httpupgradeSettings ?? x?.xhttpSettings;
+  const host = t?.headers?.Host ?? t?.host ?? front?.host;
+  return host ? `${s.server}:${s.port}|${host}|${t?.path ?? t?.service_name ?? front?.path ?? ""}` : `${s.server}:${s.port}`;
+}
 function middleOf(values) {
   return [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) / 2)];
 }
@@ -2211,7 +2254,7 @@ function rankPublic(found) {
   const slow = (f) => f.latency > SLOW_PING_MS ? 1 : 0;
   return [...found].sort((a, b) => slow(a) - slow(b) || (b.downMbps ?? 0) - (a.downMbps ?? 0) || a.latency - b.latency);
 }
-async function fetchPublicLinks(get, log, sources = [PUBLIC_CLEAN_LIST, ...PUBLIC_SOURCE_LISTS]) {
+async function fetchPublicLinks(get, log, sources = [PUBLIC_CLEAN_LIST, PUBLIC_CLOUDFLARE_LIST, ...PUBLIC_SOURCE_LISTS]) {
   const lists = await Promise.all(
     sources.map(async (urls) => {
       for (const url of urls) {
@@ -2225,7 +2268,8 @@ async function fetchPublicLinks(get, log, sources = [PUBLIC_CLEAN_LIST, ...PUBLI
       return [];
     })
   );
-  return { links: [...new Set(lists.flat())], clean: sources[0] === PUBLIC_CLEAN_LIST ? lists[0] : [] };
+  const own = sources.filter((s) => s === PUBLIC_CLEAN_LIST || s === PUBLIC_CLOUDFLARE_LIST).map((s) => lists[sources.indexOf(s)]);
+  return { links: [...new Set(lists.flat())], clean: [...new Set(own.flat())] };
 }
 function isPrivateAddress(ip) {
   if ((0, import_node_net5.isIP)(ip) === 6) return /^(::1?$|f[cd]|fe[89ab]|::ffff:)/i.test(ip);
@@ -2273,7 +2317,7 @@ function isStrong(s) {
 function choosePublicCandidates(links, skip, max = PUBLIC_TEST_MAX, random = Math.random, first = []) {
   if (first.length) {
     const chosen = choosePublicCandidates(first, skip, Math.floor(max / 2), random);
-    const held = /* @__PURE__ */ new Set([...skip, ...chosen.map((s) => `${s.server}:${s.port}`)]);
+    const held = /* @__PURE__ */ new Set([...skip, ...chosen.map(publicKey)]);
     return [...chosen, ...choosePublicCandidates(links, held, max - chosen.length, random)];
   }
   const seen = new Set(skip);
@@ -2282,7 +2326,7 @@ function choosePublicCandidates(links, skip, max = PUBLIC_TEST_MAX, random = Mat
     if (!/^(vless|vmess|trojan|ss|hysteria2|hy2|tuic):\/\//i.test(link)) continue;
     try {
       const s = parseLink(link);
-      const key = `${s.server}:${s.port}`;
+      const key = publicKey(s);
       if (seen.has(key) || publicRefusal(s)) continue;
       seen.add(key);
       usable.push(s);
@@ -2441,7 +2485,8 @@ var Cancelled = class extends Error {
 var MAX_LOGS = 1e3;
 var WARP_ATTEMPT_MS = 75e3;
 var WARP_PEER_MS = 25e3;
-var WARP_PREFER_WAIT_MS = 3e4;
+var WARP_PREFER_WAIT_MS = 6e4;
+var PSIPHON_READY_MS = 9e4;
 var WARP_PREFER_H3_MS = 8e3;
 var WARP_FIND_MORE_MS = 9e4;
 var WARP_FIND_ROUNDS = 2;
@@ -2678,16 +2723,17 @@ var Core = class extends import_node_events.EventEmitter {
    * Starts one WARP attempt; resolves once Aether serves a working tunnel on `port`. `peer` is a
    * saved gateway to use without scanning; `fresh` ignores the last working gateway.
    */
-  launchWarp(method, port, opts = {}) {
+  async launchWarp(method, port, opts = {}) {
     const timeoutMs = opts.timeoutMs ?? WARP_ATTEMPT_MS;
     const account = opts.account ?? this.ownWarpAccount;
+    const psiphon = this.psiphonChain && !opts.fresh ? { ...this.psiphonChain, port: await freePort() } : void 0;
     return new Promise((resolve, reject) => {
       const t0 = Date.now();
       let won;
       let exit;
       let gateway;
       let refused = 0;
-      const child = this.spawnAether(warpArgs(method, port, account.config, opts.peer, opts.fresh, account.verify), `warp ${method}`, (text) => {
+      const child = this.spawnAether(warpArgs(method, port, account.config, opts.peer, opts.fresh, account.verify, psiphon), `warp ${method}`, (text) => {
         if (won) return void (won.exit ??= warpExitCountry(text));
         exit = warpExitCountry(text) ?? exit;
         gateway ??= warpGateway(text);
@@ -2703,7 +2749,7 @@ var Core = class extends import_node_events.EventEmitter {
         }
         if (!warpReady(text, port)) return;
         clearTimeout(timer);
-        resolve(won = { method, port, child, exit, peer: gateway, readyMs: Date.now() - t0 });
+        resolve(won = { method, port, child, exit, peer: gateway, readyMs: Date.now() - t0, psiphonPort: psiphon?.port });
       });
       const timer = setTimeout(() => {
         child.kill();
@@ -2802,6 +2848,38 @@ var Core = class extends import_node_events.EventEmitter {
    * its own port) and the first one that carries real traffic wins; the others are stopped.
    */
   async viaWarp(server, gen) {
+    const choice = this.settings?.warpPsiphon;
+    if (!choice) return this.viaWarpAlone(server, gen);
+    const bin = this.paths.psiphon;
+    if (!bin || !(0, import_node_fs3.existsSync)(bin)) throw new Error("Psiphon (psiphon-tunnel-core.exe) not found; reinstall Bridge");
+    this.psiphonChain = { bin, region: choice === "auto" ? void 0 : choice };
+    let tunnel;
+    try {
+      const single = warpMethods(server.warp).filter((m) => !prefersForeignExit(m));
+      tunnel = await this.viaWarpAlone(single.length ? server : { ...server, warp: { method: "auto" } }, gen);
+    } finally {
+      this.psiphonChain = void 0;
+    }
+    const port = this.wonWarp?.psiphonPort;
+    if (!port) throw new Error("Psiphon did not start inside WARP");
+    this.log(`Free WARP: connecting Psiphon through WARP${choice === "auto" ? "" : `, asking for an exit in ${choice}`}`);
+    this.progress("Connecting Psiphon through WARP for an exit outside Iran");
+    const deadline = Date.now() + PSIPHON_READY_MS;
+    while (Date.now() < deadline) {
+      this.checkCancelled(gen);
+      const exit = await quickExit(port).catch(() => void 0);
+      if (exit) {
+        this.log(`Free WARP: Psiphon connected, exit ${exit} (local SOCKS ${port})`);
+        if (this.wonWarp) this.wonWarp.exit = exit;
+        return { ...tunnel, outbound: socksOutbound(port) };
+      }
+      await new Promise((r) => setTimeout(r, 2e3));
+    }
+    throw new Error(`Psiphon didn't connect through WARP within ${PSIPHON_READY_MS / 1e3} s. Choose another connection method to use WARP alone.`);
+  }
+  /** Set while connecting with Psiphon inside WARP: every WARP attempt then carries it. */
+  psiphonChain;
+  async viaWarpAlone(server, gen) {
     const exe = this.paths.aether;
     if (!exe || !(0, import_node_fs3.existsSync)(exe)) throw new Error("WARP core (aether.exe) not found; reinstall Bridge");
     (0, import_node_fs3.mkdirSync)(this.warpDir, { recursive: true });
@@ -2863,7 +2941,7 @@ var Core = class extends import_node_events.EventEmitter {
       throw new Error(`Free WARP could not connect on this network. ${reasons.join("; ")}`);
     }
     const missedKey = foreign ? "goolMissedAt" : "h3MissedAt";
-    if (prefer && winner.method === prefer) this.writeWarpState({ ...state, [missedKey]: void 0 });
+    if (prefer && (winner.method === prefer || foreign && prefersForeignExit(winner.method))) this.writeWarpState({ ...state, [missedKey]: void 0 });
     else if (wait) this.writeWarpState({ ...state, [missedKey]: Date.now() });
     return winner;
   }
@@ -2912,6 +2990,7 @@ var Core = class extends import_node_events.EventEmitter {
       stopped();
       const working = WARP_FIND_METHODS.filter((_, i) => first[i].status === "fulfilled");
       if (working.includes("gool") && working.includes("h3")) working.push("gool-h3");
+      if (working.includes("mim-h2") && working.includes("h3")) working.push("mim");
       const deadline = Date.now() + WARP_FIND_MORE_MS;
       for (let round = 0; round < WARP_FIND_ROUNDS && working.length && found.size < WARP_FIND_MAX && Date.now() < deadline; round++) {
         await Promise.allSettled(working.map((m) => tryMethod(m, WARP_FIND_ATTEMPT_MS)));
@@ -3115,7 +3194,8 @@ var Core = class extends import_node_events.EventEmitter {
    */
   raceWarp(attempts, prefer, account) {
     return new Promise((resolve, reject) => {
-      let waitingFor = prefer;
+      const foreign = !!prefer && prefersForeignExit(prefer);
+      const wanted = new Set(attempts.map((a) => a.method).filter((m) => m === prefer || foreign && prefersForeignExit(m)));
       const errors = [];
       let settled = 0;
       let fallback;
@@ -3131,21 +3211,21 @@ var Core = class extends import_node_events.EventEmitter {
         this.launchWarp(a.method, a.port, { account }).then(
           (w) => {
             settled++;
-            if (a.method === prefer) return finish(w);
+            if (wanted.has(a.method)) return finish(w);
             if (fallback) return;
             fallback = w;
-            if (!waitingFor) return finish(w);
-            const gool = prefersForeignExit(waitingFor);
+            if (!wanted.size) return finish(w);
+            const gool = foreign;
             const ms = gool ? WARP_PREFER_WAIT_MS : WARP_PREFER_H3_MS;
-            this.log(`Free WARP: ${warpLabel(a.method)} works; waiting up to ${ms / 1e3} s for ${gool ? "Gool, which exits outside Iran" : "HTTP/3, the fastest"}`);
-            this.progress(gool ? "Found a way. Giving Gool a few seconds for an exit outside Iran" : "Found a way. Giving HTTP/3, the fastest, a few seconds");
+            this.log(`Free WARP: ${warpLabel(a.method)} works; waiting up to ${ms / 1e3} s for ${gool ? "a way with two hops, which exits outside Iran" : "HTTP/3, the fastest"}`);
+            this.progress(gool ? "Found a way. Waiting a little longer for an exit outside Iran" : "Found a way. Giving HTTP/3, the fastest, a few seconds");
             wait = setTimeout(() => finish(w), ms);
           },
           (e) => {
             settled++;
-            if (a.method === waitingFor) waitingFor = void 0;
+            wanted.delete(a.method);
             errors.push(e);
-            if (fallback && !waitingFor) return finish(fallback);
+            if (fallback && !wanted.size) return finish(fallback);
             if (settled === attempts.length && !fallback && !done) {
               done = true;
               reject(new AggregateError(errors));
@@ -3633,6 +3713,49 @@ var Core = class extends import_node_events.EventEmitter {
   }
 };
 
+// src/main/cloudflarecdn.ts
+var CLOUDFLARE_ADDRESS = "188.114.98.0";
+var TLS_PORTS = /* @__PURE__ */ new Set(["443", "2053", "2083", "2087", "2096", "8443"]);
+var HTTP_PORTS = /* @__PURE__ */ new Set(["80", "8080", "8880", "2052", "2082", "2086", "2095"]);
+var TRANSPORTS = /* @__PURE__ */ new Set(["ws", "websocket", "httpupgrade", "xhttp", "splithttp", "grpc"]);
+var DROPPED = /* @__PURE__ */ new Set(["allowinsecure", "insecure", "skip-cert-verify", "fm", "dialmode", "ech", "echoutbound", "fp", "cs", "pqv"]);
+var CLOUDFLARE_FRAGMENT = JSON.stringify({ tcp: [{ type: "fragment", settings: { packets: "tlshello", length: "100-200", delay: "1" } }] });
+function toCloudflare(link) {
+  const scheme = link.slice(0, link.indexOf("://")).toLowerCase();
+  if (scheme !== "vless" && scheme !== "trojan") return void 0;
+  let url;
+  try {
+    url = new URL(`http${link.slice(link.indexOf("://"))}`);
+  } catch {
+    return void 0;
+  }
+  const params = /* @__PURE__ */ new Map();
+  for (const [k, v] of url.searchParams) params.set(k.toLowerCase(), v);
+  const security = (params.get("security") ?? "").toLowerCase();
+  const transport = (params.get("type") ?? "tcp").toLowerCase();
+  const host = (params.get("host") ?? "").split(",")[0].trim();
+  const port = url.port || (security === "tls" ? "443" : "80");
+  if (!url.username || !host || !TRANSPORTS.has(transport) || !["", "tls", "none"].includes(security)) return void 0;
+  if (TLS_PORTS.has(port) ? security !== "tls" : !HTTP_PORTS.has(port) || security === "tls") return void 0;
+  const out = new URLSearchParams();
+  for (const [k, v] of params) if (!DROPPED.has(k) && !["security", "sni", "alpn", "host"].includes(k)) out.set(k, v);
+  out.set("security", "tls");
+  out.set("host", host);
+  out.set("sni", host);
+  out.set("fp", "chrome");
+  if (transport === "ws" || transport === "websocket" || transport === "httpupgrade") out.set("alpn", "http/1.1");
+  else if (params.get("alpn")) out.set("alpn", params.get("alpn"));
+  const name = link.includes("#") ? link.slice(link.indexOf("#")) : "";
+  return `${scheme}://${url.username}@${CLOUDFLARE_ADDRESS}:443?${out}${name}`;
+}
+function cloudflareKey(link) {
+  return link.split("#")[0];
+}
+function withFragment(link) {
+  const [body, name = ""] = link.split("#");
+  return `${body}&fm=${encodeURIComponent(CLOUDFLARE_FRAGMENT)}${name ? `#${name}` : ""}`;
+}
+
 // src/main/store.ts
 var DEFAULT_SETTINGS = {
   mode: "per-app",
@@ -3649,12 +3772,15 @@ var DEFAULT_SETTINGS = {
   showInDiscord: true,
   language: "en",
   buttonStyle: "dashboard",
+  warpPsiphon: "",
   settingsVersion: 2
 };
 
 // scripts/collect-configs.ts
 var TEST_MAX = Number(arg("--test-max") ?? 1500);
 var KEEP_MAX = Number(arg("--keep-max") ?? 300);
+var CF_TEST_MAX = Number(arg("--cf-test-max") ?? 6e3);
+var CF_KEEP_MAX = Number(arg("--cf-keep-max") ?? 150);
 var KEEP_MIN = Number(arg("--keep-min") ?? 20);
 var LINK = /(?:vless|vmess|trojan|ss|hysteria2|hy2|tuic):\/\/[^\s<>"']+/g;
 function arg(name) {
@@ -3696,29 +3822,47 @@ async function main() {
   const out = arg("--out") ?? process.cwd();
   const channelFile = arg("--channels");
   const names = channelFile && (0, import_node_fs4.existsSync)(channelFile) ? (0, import_node_fs4.readFileSync)(channelFile, "utf8").split(/\r?\n/).map((l) => l.trim()).filter((l) => /^[A-Za-z0-9_]{4,40}$/.test(l)) : [];
-  const fromLists = (await fetchPublicLinks(getText, (t) => console.log(t), PUBLIC_SOURCE_LISTS)).links;
+  const fromLists = (await fetchPublicLinks(getText, (t) => console.log(t), [...PUBLIC_SOURCE_LISTS, ...COLLECTOR_EXTRA_LISTS])).links;
   const channels = await fromChannels(names);
   const all = [.../* @__PURE__ */ new Set([...channels.links, ...fromLists])];
   console.log(`${fromLists.length} links from lists, ${channels.links.length} from ${channels.answered} of ${names.length} channels, ${all.length} different`);
   const candidates = choosePublicCandidates(all, /* @__PURE__ */ new Set(), TEST_MAX);
   console.log(`${candidates.length} candidates after the filters`);
+  const converted = /* @__PURE__ */ new Map();
+  for (const link of all) {
+    const cf = toCloudflare(link);
+    if (cf && !converted.has(cloudflareKey(cf))) converted.set(cloudflareKey(cf), cf);
+  }
+  const cfCandidates = [...converted.values()].sort(() => Math.random() - 0.5).flatMap((link) => {
+    try {
+      const s = parseLink(link);
+      return publicRefusal(s) ? [] : [s];
+    } catch {
+      return [];
+    }
+  }).slice(0, CF_TEST_MAX);
+  console.log(`${converted.size} configs behind Cloudflare, ${cfCandidates.length} of them tested`);
   const dataDir = (0, import_node_fs4.mkdtempSync)((0, import_node_path3.join)((0, import_node_os3.tmpdir)(), "bridge-collect-"));
   const core = new Core({ singBox: (0, import_node_path3.join)(cores, "sing-box.exe"), xray: (0, import_node_path3.join)(cores, "xray.exe"), rulesDir: (0, import_node_path3.join)(cores, "rules"), dataDir });
   core.on("log", (l) => /^Public configs/.test(l.text) && console.log(l.text));
   const kept = await core.checkPublicConfigs(candidates, DEFAULT_SETTINGS.testUrl, KEEP_MAX);
+  const cfKept = await core.checkPublicConfigs(cfCandidates, DEFAULT_SETTINGS.testUrl, CF_KEEP_MAX);
   await core.stop().catch(() => void 0);
   (0, import_node_fs4.rmSync)(dataDir, { recursive: true, force: true });
   const seconds = Math.round((Date.now() - started) / 1e3);
-  console.log(`${kept.length} kept in ${seconds} s`);
+  console.log(`${kept.length} kept and ${cfKept.length} behind Cloudflare in ${seconds} s`);
   if (kept.length < KEEP_MIN) throw new Error(`Only ${kept.length} configs passed; keeping the previous list`);
   const links = kept.map((k, i) => withName(k.server.link, `Bridge ${i + 1}`));
   (0, import_node_fs4.mkdirSync)(out, { recursive: true });
   (0, import_node_fs4.writeFileSync)((0, import_node_path3.join)(out, "clean.txt"), `${links.join("\n")}
 `);
+  const cfLinks = cfKept.flatMap((k, i) => [withName(k.server.link, `Bridge CF ${i + 1}`), withName(withFragment(k.server.link), `Bridge CF ${i + 1} F`)]);
+  if (cfLinks.length) (0, import_node_fs4.writeFileSync)((0, import_node_path3.join)(out, "cloudflare.txt"), `${cfLinks.join("\n")}
+`);
   const count = (protocol) => kept.filter((k) => k.server.protocol === protocol).length;
   (0, import_node_fs4.writeFileSync)(
     (0, import_node_path3.join)(out, "stats.json"),
-    `${JSON.stringify({ updatedAt: (/* @__PURE__ */ new Date()).toISOString(), collected: all.length, tested: candidates.length, kept: kept.length, vless: count("vless"), trojan: count("trojan"), vmess: count("vmess"), shadowsocks: count("shadowsocks"), hysteria2: count("hysteria2"), tuic: count("tuic"), channelsAnswered: channels.answered, seconds }, null, 2)}
+    `${JSON.stringify({ updatedAt: (/* @__PURE__ */ new Date()).toISOString(), collected: all.length, tested: candidates.length, kept: kept.length, cloudflare: cfKept.length, cloudflareFound: converted.size, vless: count("vless"), trojan: count("trojan"), vmess: count("vmess"), shadowsocks: count("shadowsocks"), hysteria2: count("hysteria2"), tuic: count("tuic"), channelsAnswered: channels.answered, seconds }, null, 2)}
 `
   );
 }

@@ -50,6 +50,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add clean.txt stats.json
+          git add clean.txt stats.json $(ls cloudflare.txt 2>/dev/null)
           git diff --cached --quiet || git commit -m "Update the clean list"
           git push

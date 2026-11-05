@@ -5,12 +5,15 @@ A list of free public configs, rebuilt every day for [Bridge](https://github.com
 **Nobody knows who runs these servers, and that includes this project.** They can see your IP address and which sites you open. Use them to get online and for ordinary browsing, not for logins, banking or anything sensitive.
 
 - `clean.txt`: the list, one share link per line.
+- `cloudflare.txt`: configs behind Cloudflare's CDN, moved onto a Cloudflare address that answers from Iran. Each one comes twice: as it is, and with its TLS hello split.
 - `stats.json`: how the last run went.
 - `channels.txt`: the public Telegram channels it reads, one per line.
 
 ## How the list is made
 
 Once a day a GitHub Action gathers links from public GitHub lists and the public preview pages of the channels. It drops anything that isn't encrypted, doesn't check the server's certificate, or points at a local or `.ir` address. It then tests the rest with the real sing-box and Xray cores, and keeps those that carry HTTPS with a valid certificate and leave outside Iran. Names from the sources, which are mostly adverts, are replaced.
+
+For `cloudflare.txt`, every VLESS or Trojan config on WebSocket, HTTPUpgrade, XHTTP or gRPC with a Host is moved onto a Cloudflare address, with its Host as the server name, since Cloudflare picks the origin by name. This idea, and many of the sources, come from [patterniha/Free-Configs](https://github.com/patterniha/Free-Configs) (MIT); only what the official cores understand is used.
 
 The tests run outside Iran, so they weed out dead servers, not filtered ones. Bridge tests the list again on your own network.
 
@@ -27,6 +30,7 @@ The tests run outside Iran, so they weed out dead servers, not filtered ones. Br
 **معلوم نیست این سرورها را چه کسی اداره می‌کند، حتی برای خود این پروژه.** آن‌ها آی‌پی شما و سایت‌هایی را که باز می‌کنید می‌بینند. فقط برای وصل شدن به اینترنت و گشت‌وگذار معمولی از آن‌ها استفاده کنید، نه برای ورود به حساب‌ها، کارهای بانکی یا هر کار حساسی.
 
 - `clean.txt`: خود فهرست، هر خط یک لینک.
+- `cloudflare.txt`: کانفیگ‌های پشت CDN کلادفلر که روی یک آدرس Cloudflare که از ایران جواب می‌دهد برده شده‌اند؛ هر کدام دو بار، یک بار با تکه‌تکه شدن TLS hello.
 - `stats.json`: گزارش آخرین اجرا.
 - `channels.txt`: کانال‌های عمومی تلگرام که خوانده می‌شوند، هر خط یکی.
 
