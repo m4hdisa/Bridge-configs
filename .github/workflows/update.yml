@@ -1,0 +1,55 @@
+name: Update the clean list
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Download the cores, checked against known hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force cores | Out-Null
+          $tmp = Join-Path $env:RUNNER_TEMP 'cores'
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          $files = @(
+            @{ url = 'https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip'; sha = '99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df'; exe = 'sing-box.exe' },
+            @{ url = 'https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-windows-64.zip'; sha = 'fc58c39ee2f2717b4c54d28d374362389e5319b20ae44aea76ea45a5243ec827'; exe = 'xray.exe' }
+          )
+          foreach ($f in $files) {
+            $zip = Join-Path $tmp $f.exe.Replace('.exe', '.zip')
+            Invoke-WebRequest -Uri $f.url -OutFile $zip
+            if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $f.sha) { throw "Wrong hash: $($f.url)" }
+            $dir = Join-Path $tmp $f.exe.Replace('.exe', '')
+            Expand-Archive $zip -DestinationPath $dir -Force
+            Copy-Item (Get-ChildItem $dir -Recurse -Filter $f.exe | Select-Object -First 1).FullName cores
+          }
+
+      - name: Collect and test
+        run: node collect.cjs --channels channels.txt --cores cores --out .
+
+      - name: Publish
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add clean.txt stats.json
+          git diff --cached --quiet || git commit -m "Update the clean list"
+          git push
