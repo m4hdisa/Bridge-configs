@@ -1,0 +1,14 @@
+{
+  "updatedAt": "2026-11-05T17:47:22.245Z",
+  "collected": 19910,
+  "tested": 1500,
+  "kept": 274,
+  "vless": 162,
+  "trojan": 30,
+  "vmess": 29,
+  "shadowsocks": 49,
+  "hysteria2": 4,
+  "tuic": 0,
+  "channelsAnswered": 38,
+  "seconds": 193
+}
