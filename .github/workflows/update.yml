@@ -42,6 +42,22 @@ jobs:
             Copy-Item (Get-ChildItem $dir -Recurse -Filter $f.exe | Select-Object -First 1).FullName cores
           }
 
+      - name: Download Aether (for WARP starter accounts), checked against its known hash
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'aether.zip'
+          Invoke-WebRequest -Uri 'https://github.com/CluvexStudio/Aether/releases/download/v2.4.0/aether-windows-x86_64.zip' -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne '21b1444628d37121e873878e2eddd7932215418af1a2a12470caee5809026f1a') { throw 'Wrong hash: Aether' }
+          $dir = Join-Path $env:RUNNER_TEMP 'aether'
+          Expand-Archive $zip -DestinationPath $dir -Force
+          Copy-Item (Get-ChildItem $dir -Recurse -Filter aether.exe | Select-Object -First 1).FullName cores
+
+      # A day without new accounts keeps yesterday's list, so this never holds up the config list.
+      - name: Make WARP starter accounts
+        continue-on-error: true
+        run: node warp-accounts.cjs --aether cores/aether.exe --count 60 --out .
+
       - name: Collect and test
         run: node collect.cjs --channels channels.txt --cores cores --out .
 
@@ -50,6 +66,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add clean.txt stats.json $(ls cloudflare.txt 2>/dev/null)
+          git add clean.txt stats.json $(ls cloudflare.txt warp.txt 2>/dev/null)
           git diff --cached --quiet || git commit -m "Update the clean list"
           git push
