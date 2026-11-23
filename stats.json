@@ -1,16 +1,16 @@
 {
-  "updatedAt": "2026-11-22T11:22:37.131Z",
-  "collected": 41625,
+  "updatedAt": "2026-11-23T12:34:16.343Z",
+  "collected": 42254,
   "tested": 1500,
   "kept": 275,
-  "cloudflare": 18,
-  "cloudflareFound": 4471,
-  "vless": 143,
-  "trojan": 18,
-  "vmess": 38,
-  "shadowsocks": 75,
-  "hysteria2": 1,
+  "cloudflare": 27,
+  "cloudflareFound": 4383,
+  "vless": 131,
+  "trojan": 19,
+  "vmess": 40,
+  "shadowsocks": 85,
+  "hysteria2": 0,
   "tuic": 0,
   "channelsAnswered": 38,
-  "seconds": 290
+  "seconds": 287
 }
